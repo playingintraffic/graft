@@ -2,7 +2,7 @@
 
 # GRAFT - General Runtime Abstraction & Framework Toolkit
 
-📚 **Full Docs:** [docs.boii.dev](https://docs.boii.dev)
+📚 **Full Docs:** [Documentation](https://playingintraffic.site/docs/graft)
 
 💬 **Support:** [Discord](https://discord.gg/MUckUyS5Kq)
 
