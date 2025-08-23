@@ -182,6 +182,71 @@ end
 
 exports("update_user_data", graft.update_user_data)
 
+--- Ban a user by source or unique_id, with a reason and optional expiry.
+--- @param input number|string: Either a source ID or a unique_id string.
+--- @param banned_by string: Admin username or source performing the ban.
+--- @param reason string: Reason for the ban.
+--- @param duration number|nil: Optional duration in seconds (nil = permanent).
+--- @return boolean: True if banned, false if not found or error.
+function graft.ban_user(input, banned_by, reason, duration)
+    local user = type(input) == "number" and graft.get_user(input) or nil
+    local unique_id
+
+    if user then
+        unique_id = user.unique_id
+    elseif type(input) == "string" then
+        unique_id = input
+    end
+
+    if not unique_id then return false end
+
+    local expires_at = duration and os.date("%Y-%m-%d %H:%M:%S", os.time() + duration) or nil
+
+    MySQL.prepare.await("UPDATE graft_users SET banned = 1 WHERE unique_id = ?", { unique_id })
+
+    MySQL.prepare.await([[
+        INSERT INTO graft_bans (unique_id, banned_by, reason, expires_at)
+        VALUES (?, ?, ?, ?)
+    ]], { unique_id, banned_by or "graft", reason or "No reason provided", expires_at })
+
+    for src, data in pairs(connected_users) do
+        if data.unique_id == unique_id then
+            DropPlayer(src, string.format("You have been banned.\nReason: %s", reason or "No reason provided"))
+            connected_users[src] = nil
+            break
+        end
+    end
+
+    return true
+end
+
+exports("ban_user", graft.ban_user)
+
+--- Unban a user by their unique ID.
+--- @param unique_id string: The unique ID of the banned user.
+--- @return boolean: True if unbanned, false if not found or already unbanned.
+function graft.unban_user(unique_id)
+    if not unique_id then return false end
+
+    local result = MySQL.query.await("SELECT banned FROM graft_users WHERE unique_id = ?", { unique_id })
+    if not result or not result[1] then return false end
+    if result[1].banned == 0 then return false end
+
+    MySQL.prepare.await("UPDATE graft_users SET banned = 0 WHERE unique_id = ?", { unique_id })
+
+    MySQL.prepare.await([[
+        UPDATE graft_bans
+        SET expired = 1
+        WHERE unique_id = ? AND expired = 0
+        ORDER BY timestamp DESC
+        LIMIT 1
+    ]], { unique_id })
+
+    return true
+end
+
+exports("unban_user", graft.unban_user)
+
 --- @section Event Handlers
 
 --- Handle player connection, validate identifiers, check bans, and create user data if necessary.
@@ -191,10 +256,7 @@ exports("update_user_data", graft.update_user_data)
 local function on_player_connect(name, kick, deferrals)
     local source = source
     local ids = graft.get_identifiers(source)
-    if not ids.license then
-        kick("No valid license found.")
-        return
-    end
+    if not ids.license then kick("No valid license found.") return end
 
     local unique_id = graft.generate_unique_id(graft.unique_id_prefix, graft.unique_id_chars, "graft_users", "unique_id")
 
@@ -202,11 +264,39 @@ local function on_player_connect(name, kick, deferrals)
     update_deferral(deferrals, "Checking your identifiers...", 100)
 
     local result = graft.check_if_user_data_exists(ids.license)
-    if result[1] then
+    local user_data = result and result[1]
+
+    if user_data then
         update_deferral(deferrals, "User data found. Checking bans...", 500)
-        if is_player_banned(result[1], deferrals) then return end
+
+        local ban = MySQL.query.await([[
+            SELECT id, reason, expires_at FROM graft_bans
+            WHERE unique_id = ? AND expired = 0
+            ORDER BY timestamp DESC
+            LIMIT 1
+        ]], { user_data.unique_id })
+
+        local active_ban = ban and ban[1]
+
+        if active_ban then
+            if active_ban.expires_at and os.time() > os.time({ year=1970, month=1, day=1 }) then
+                local expires = os.time(os.date("*t", os.time(active_ban.expires_at)))
+                if os.time() > expires then
+                    MySQL.prepare.await("UPDATE graft_bans SET expired = 1 WHERE id = ?", { active_ban.id })
+                    MySQL.prepare.await("UPDATE graft_users SET banned = 0 WHERE unique_id = ?", { user_data.unique_id })
+                    print(("[GRAFT] Auto-expired ban for %s"):format(user_data.unique_id))
+                else
+                    deferrals.done(("You are banned until %s.\nReason: %s"):format(active_ban.expires_at, active_ban.reason or "No reason provided"))
+                    return
+                end
+            else
+                deferrals.done(("You are permanently banned.\nReason: %s"):format(active_ban.reason or "No reason provided"))
+                return
+            end
+        end
+
         update_deferral(deferrals, "Welcome back!", 500)
-        temp_connected_users[ids.license] = result[1]
+        temp_connected_users[ids.license] = user_data
     else
         update_deferral(deferrals, "Creating new user...", 500)
         graft.create_user(name, unique_id, ids.license, ids.discord, GetPlayerTokens(source), ids.ip)
@@ -236,8 +326,8 @@ local function on_player_connect(name, kick, deferrals)
     update_deferral(deferrals, "Welcome to the community!", 500)
     deferrals.done()
 end
-AddEventHandler("playerConnecting", on_player_connect)
 
+AddEventHandler("playerConnecting", on_player_connect)
 
 --- Moves player from temp to connected on join.
 local function on_player_joining()
