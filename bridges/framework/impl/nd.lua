@@ -128,8 +128,8 @@ if graft.is_server then
     --- @return Item object if found, nil otherwise.
     function bridge.get_item(source, item_name)
         if GetResourceState("ox_inventory") == "started" then
-            local items = exports.ox_inventory:Search(source, "items", item_name)
-            return items and items[1]
+            local item = exports.ox_inventory:GetItem(source, item_name, nil, false)
+            return item and item.count and item.count > 0 and item or nil
         end
 
         if GetResourceState("list_inventory") == "started" then
@@ -137,8 +137,7 @@ if graft.is_server then
             return inv and inv:get_item(item_name) or nil
         end
 
-        local player = bridge.get_player(source)
-        if not player then return nil end
+        return nil
     end
 
     --- Checks if a player has a specific item in their inventory.
@@ -449,5 +448,6 @@ else
     end
 
 end
+
 
 return bridge
